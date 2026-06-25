@@ -7,7 +7,6 @@ export type AppConfig = {
   pumpTokenMint: PublicKey;
   snapshotTokenMint: PublicKey;
   airdropTokenMint: PublicKey;
-  jupiterApiKey: string;
   jupiterApiUrl: string;
   solReserve: number;
   minSwapSol: number;
@@ -17,6 +16,7 @@ export type AppConfig = {
   dryRun: boolean;
   stateFilePath: string;
   minHolderTokenUi: number;
+  maxHolderPercent: number;
   airdropEnabled: boolean;
   airdropAmountUi: number;
   maxAirdropsPerRun: number;
@@ -26,7 +26,7 @@ export type AppConfig = {
   corsOrigin: string;
 };
 
-const DEFAULT_JUPITER_API_URL = "https://api.jup.ag/swap/v2";
+const DEFAULT_JUPITER_API_URL = "https://lite-api.jup.ag/swap/v1";
 const DEFAULT_SOL_RESERVE = 0.2;
 const DEFAULT_MIN_SWAP_SOL = 0.01;
 const DEFAULT_MAX_SWAP_SOL_PER_RUN = 10;
@@ -34,6 +34,7 @@ const DEFAULT_SLIPPAGE_BPS = 300;
 const DEFAULT_INTERVAL_MINUTES = 5;
 const DEFAULT_STATE_FILE_PATH = "./data/state.json";
 const DEFAULT_MIN_HOLDER_TOKEN_UI = 0;
+const DEFAULT_MAX_HOLDER_PERCENT = 4;
 const DEFAULT_MAX_AIRDROPS_PER_RUN = 50;
 const DEFAULT_PORT = 3000;
 
@@ -127,7 +128,6 @@ export function loadConfig(): AppConfig {
     pumpTokenMint: parsePublicKey("PUMP_TOKEN_MINT", pumpTokenMintRaw),
     snapshotTokenMint: parsePublicKey("SNAPSHOT_TOKEN_MINT", snapshotTokenMintRaw),
     airdropTokenMint: parsePublicKey("AIRDROP_TOKEN_MINT", airdropTokenMintRaw),
-    jupiterApiKey: requireEnv("JUPITER_API_KEY"),
     jupiterApiUrl: optionalEnv("JUPITER_API_URL", DEFAULT_JUPITER_API_URL).replace(/\/$/, ""),
     solReserve,
     minSwapSol,
@@ -137,6 +137,7 @@ export function loadConfig(): AppConfig {
     dryRun: parseBoolean("DRY_RUN", true),
     stateFilePath: optionalEnv("STATE_FILE_PATH", DEFAULT_STATE_FILE_PATH),
     minHolderTokenUi: parseNonNegativeNumber("MIN_HOLDER_TOKEN_UI", DEFAULT_MIN_HOLDER_TOKEN_UI),
+    maxHolderPercent: parsePositiveNumber("MAX_HOLDER_PERCENT", DEFAULT_MAX_HOLDER_PERCENT),
     airdropEnabled: parseBoolean("AIRDROP_ENABLED", false),
     airdropAmountUi: parseNonNegativeNumber("AIRDROP_AMOUNT_UI", 0),
     maxAirdropsPerRun: parseInteger("MAX_AIRDROPS_PER_RUN", DEFAULT_MAX_AIRDROPS_PER_RUN),
