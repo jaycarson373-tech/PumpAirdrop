@@ -1,35 +1,36 @@
-import { Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  VersionedTransaction
+} from "@solana/web3.js";
 import { AppConfig } from "./config.js";
 import { log } from "./logger.js";
 import { withRetry } from "./retry.js";
 import { NATIVE_SOL_MINT } from "./solana.js";
 
-export type JupiterOrderResponse = {
+export type JupiterQuoteResponse = {
   inputMint: string;
   outputMint: string;
   inAmount: string;
   outAmount: string;
-  outUsdValue?: number;
-  priceImpact?: number;
-  transaction?: string;
-  requestId?: string;
-  lastValidBlockHeight?: string;
+  otherAmountThreshold?: string;
+  swapMode?: string;
+  slippageBps?: number;
+  priceImpactPct?: string;
+  routePlan?: unknown[];
   error?: string;
-  errorMessage?: string;
 };
 
-export type JupiterExecuteResponse = {
-  status?: "Success" | "Failed";
-  signature?: string;
-  slot?: string;
+export type JupiterSwapResponse = {
+  swapTransaction?: string;
+  lastValidBlockHeight?: number;
+  prioritizationFeeLamports?: number;
   error?: string;
-  code?: number;
-  totalInputAmount?: string;
-  totalOutputAmount?: string;
 };
 
-function buildOrderUrl(config: AppConfig, params: Record<string, string>): URL {
-  const url = new URL(`${config.jupiterApiUrl}/order`);
+function buildQuoteUrl(config: AppConfig, params: Record<string, string>): URL {
+  const url = new URL(`${config.jupiterApiUrl}/quote`);
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
   }
@@ -53,104 +54,115 @@ async function parseJsonResponse<T>(response: Response, label: string): Promise<
   return data as T;
 }
 
-export async function getPumpOrder(params: {
+export async function getPumpQuote(params: {
   config: AppConfig;
-  taker: PublicKey;
   amountSol: number;
-}): Promise<JupiterOrderResponse> {
-  const { config, taker, amountSol } = params;
+}): Promise<JupiterQuoteResponse> {
+  const { config, amountSol } = params;
   const amountLamports = Math.floor(amountSol * LAMPORTS_PER_SOL).toString();
-  const url = buildOrderUrl(config, {
+  const url = buildQuoteUrl(config, {
     inputMint: NATIVE_SOL_MINT.toBase58(),
     outputMint: config.pumpTokenMint.toBase58(),
     amount: amountLamports,
-    taker: taker.toBase58(),
     swapMode: "ExactIn",
     slippageBps: String(config.slippageBps)
   });
 
-  return withRetry("Jupiter order", async () => {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "x-api-key": config.jupiterApiKey
-      }
-    });
-    const order = await parseJsonResponse<JupiterOrderResponse>(response, "Jupiter order");
+  return withRetry("Jupiter quote", async () => {
+    const response = await fetch(url, { method: "GET" });
+    const quote = await parseJsonResponse<JupiterQuoteResponse>(response, "Jupiter quote");
 
-    if (order.error || order.errorMessage) {
-      throw new Error(`Jupiter order error: ${order.error ?? order.errorMessage}`);
+    if (quote.error) {
+      throw new Error(`Jupiter quote error: ${quote.error}`);
     }
 
-    return order;
+    return quote;
   });
 }
 
 export async function swapSolToPump(params: {
   config: AppConfig;
+  connection: Connection;
   wallet: Keypair;
   amountSol: number;
 }): Promise<string | null> {
-  const { config, wallet, amountSol } = params;
-  const order = await getPumpOrder({
+  const { config, connection, wallet, amountSol } = params;
+  const quote = await getPumpQuote({
     config,
-    taker: wallet.publicKey,
     amountSol
   });
 
-  log("info", "Jupiter swap order received", {
+  log("info", "Jupiter swap quote received", {
     amountSol,
-    inputLamports: order.inAmount,
-    estimatedPumpOut: order.outAmount,
-    outUsdValue: order.outUsdValue ?? null,
-    priceImpact: order.priceImpact ?? null,
-    requestId: order.requestId ?? null,
+    inputLamports: quote.inAmount,
+    estimatedPumpOut: quote.outAmount,
+    priceImpactPct: quote.priceImpactPct ?? null,
     dryRun: config.dryRun
   });
 
   if (config.dryRun) {
-    log("info", "dry run: would sign and execute Jupiter SOL to PUMP swap", {
-      amountSol,
-      requestId: order.requestId ?? null
-    });
+    log("info", "dry run: would request Jupiter transaction, sign it, and send via RPC", { amountSol });
     return null;
   }
 
-  if (!order.transaction || !order.requestId) {
-    throw new Error("Jupiter order did not include transaction/requestId");
-  }
-
-  const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
-  transaction.sign([wallet]);
-  const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-
-  const executeResponse = await withRetry("Jupiter execute", async () => {
-    const response = await fetch(`${config.jupiterApiUrl}/execute`, {
+  const swapResponse = await withRetry("Jupiter swap transaction", async () => {
+    const response = await fetch(`${config.jupiterApiUrl}/swap`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-api-key": config.jupiterApiKey
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        signedTransaction,
-        requestId: order.requestId,
-        lastValidBlockHeight: order.lastValidBlockHeight
+        quoteResponse: quote,
+        userPublicKey: wallet.publicKey.toBase58(),
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: {
+          priorityLevelWithMaxLamports: {
+            priorityLevel: "high",
+            maxLamports: 1_000_000
+          }
+        }
       })
     });
 
-    return parseJsonResponse<JupiterExecuteResponse>(response, "Jupiter execute");
+    return parseJsonResponse<JupiterSwapResponse>(response, "Jupiter swap transaction");
   });
 
-  if (executeResponse.status === "Failed" || executeResponse.error) {
-    throw new Error(`Jupiter execute failed: ${executeResponse.error ?? executeResponse.code}`);
+  if (swapResponse.error || !swapResponse.swapTransaction) {
+    throw new Error(`Jupiter swap failed: ${swapResponse.error ?? "missing swapTransaction"}`);
+  }
+
+  const transaction = VersionedTransaction.deserialize(Buffer.from(swapResponse.swapTransaction, "base64"));
+  transaction.sign([wallet]);
+
+  const signature = await withRetry("send Jupiter swap", () =>
+    connection.sendRawTransaction(transaction.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3
+    })
+  );
+
+  if (swapResponse.lastValidBlockHeight) {
+    await withRetry("confirm Jupiter swap", () =>
+      connection.confirmTransaction(
+        {
+          signature,
+          blockhash: transaction.message.recentBlockhash,
+          lastValidBlockHeight: swapResponse.lastValidBlockHeight
+        },
+        "confirmed"
+      )
+    );
+  } else {
+    await withRetry("confirm Jupiter swap", () => connection.confirmTransaction(signature, "confirmed"));
   }
 
   log("info", "Jupiter SOL to PUMP swap executed", {
-    signature: executeResponse.signature,
-    slot: executeResponse.slot,
-    totalInputAmount: executeResponse.totalInputAmount,
-    totalOutputAmount: executeResponse.totalOutputAmount
+    signature,
+    inputLamports: quote.inAmount,
+    estimatedPumpOut: quote.outAmount,
+    prioritizationFeeLamports: swapResponse.prioritizationFeeLamports ?? null
   });
 
-  return executeResponse.signature ?? null;
+  return signature;
 }
