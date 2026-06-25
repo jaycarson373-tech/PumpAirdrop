@@ -18,6 +18,7 @@ export type AirdropRecord = {
 export type WorkerState = {
   version: 1;
   holderBalancesUi: Record<string, string>;
+  largeHolderBalancesUi: Record<string, string>;
   ineligibleWallets: Record<string, IneligibleWallet>;
   airdrops: Record<string, AirdropRecord>;
   lastSnapshotId: string | null;
@@ -28,6 +29,7 @@ export function emptyState(): WorkerState {
   return {
     version: 1,
     holderBalancesUi: {},
+    largeHolderBalancesUi: {},
     ineligibleWallets: {},
     airdrops: {},
     lastSnapshotId: null,
@@ -43,6 +45,7 @@ export async function loadState(path: string): Promise<WorkerState> {
       ...emptyState(),
       ...parsed,
       holderBalancesUi: parsed.holderBalancesUi ?? {},
+      largeHolderBalancesUi: parsed.largeHolderBalancesUi ?? {},
       ineligibleWallets: parsed.ineligibleWallets ?? {},
       airdrops: parsed.airdrops ?? {}
     };
