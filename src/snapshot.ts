@@ -1,9 +1,8 @@
 import {
   Connection,
-  ParsedAccountData,
-  PublicKey
+  ParsedAccountData
 } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { getMint, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { AppConfig } from "./config.js";
 import { log } from "./logger.js";
 import { withRetry } from "./retry.js";
@@ -15,6 +14,7 @@ export type HolderSnapshot = {
   holders: Record<string, string>;
   eligibleWallets: string[];
   newlyIneligibleWallets: string[];
+  excludedLargeHolderWallets: string[];
 };
 
 function toUiNumber(value: string): number {
@@ -30,8 +30,9 @@ export async function snapshotHolders(params: {
   const { connection, config, state } = params;
   const mint = config.snapshotTokenMint;
 
-  const [slot, accounts] = await Promise.all([
+  const [slot, mintInfo, accounts] = await Promise.all([
     withRetry("get snapshot slot", () => connection.getSlot("confirmed")),
+    withRetry("get snapshot mint info", () => getMint(connection, mint)),
     withRetry("get token holder accounts", () =>
       connection.getParsedProgramAccounts(TOKEN_PROGRAM_ID, {
         commitment: "confirmed",
@@ -49,6 +50,8 @@ export async function snapshotHolders(params: {
   ]);
 
   const holders: Record<string, string> = {};
+  const maxHolderUi =
+    (Number(mintInfo.supply) / 10 ** mintInfo.decimals) * (config.maxHolderPercent / 100);
 
   for (const account of accounts) {
     const data = account.account.data as ParsedAccountData;
@@ -67,7 +70,7 @@ export async function snapshotHolders(params: {
     if (config.excludedWallets.has(owner)) continue;
 
     const current = toUiNumber(amountUi);
-    if (current <= config.minHolderTokenUi) continue;
+    if (current < config.minHolderTokenUi) continue;
 
     holders[owner] = String((toUiNumber(holders[owner] ?? "0") + current).toFixed(9));
   }
@@ -91,8 +94,20 @@ export async function snapshotHolders(params: {
 
   state.holderBalancesUi = holders;
 
+  const excludedLargeHolderWallets = Object.entries(holders)
+    .filter(([, amountUi]) => toUiNumber(amountUi) >= maxHolderUi)
+    .map(([wallet]) => wallet);
+  const excludedLargeHolderSet = new Set(excludedLargeHolderWallets);
+  state.largeHolderBalancesUi = Object.fromEntries(
+    excludedLargeHolderWallets.map((wallet) => [wallet, holders[wallet] ?? "0"])
+  );
+
   const eligibleWallets = Object.keys(holders).filter((wallet) => {
-    return !state.ineligibleWallets[wallet] && !config.excludedWallets.has(wallet);
+    return (
+      !state.ineligibleWallets[wallet] &&
+      !config.excludedWallets.has(wallet) &&
+      !excludedLargeHolderSet.has(wallet)
+    );
   });
 
   const snapshotId = `${slot}-${Date.now()}`;
@@ -104,6 +119,10 @@ export async function snapshotHolders(params: {
     slot,
     holderCount: Object.keys(holders).length,
     eligibleCount: eligibleWallets.length,
+    minHolderTokenUi: config.minHolderTokenUi,
+    maxHolderPercent: config.maxHolderPercent,
+    maxHolderUi: maxHolderUi.toFixed(9),
+    excludedLargeHolderCount: excludedLargeHolderWallets.length,
     newlyIneligibleCount: newlyIneligibleWallets.length
   });
 
@@ -112,6 +131,7 @@ export async function snapshotHolders(params: {
     slot,
     holders,
     eligibleWallets,
-    newlyIneligibleWallets
+    newlyIneligibleWallets,
+    excludedLargeHolderWallets
   };
 }
