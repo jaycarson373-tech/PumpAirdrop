@@ -142,13 +142,16 @@ export async function swapSolToPump(params: {
     })
   );
 
-  if (swapResponse.lastValidBlockHeight) {
+  const lastValidBlockHeight = swapResponse.lastValidBlockHeight;
+  const blockhash = transaction.message.recentBlockhash;
+
+  if (typeof lastValidBlockHeight === "number") {
     await withRetry("confirm Jupiter swap", () =>
       connection.confirmTransaction(
         {
           signature,
-          blockhash: transaction.message.recentBlockhash,
-          lastValidBlockHeight: swapResponse.lastValidBlockHeight
+          blockhash,
+          lastValidBlockHeight
         },
         "confirmed"
       )
