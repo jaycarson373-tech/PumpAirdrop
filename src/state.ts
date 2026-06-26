@@ -9,7 +9,9 @@ export type IneligibleWallet = {
 };
 
 export type AirdropRecord = {
+  wallet?: string;
   amountUi: string;
+  amountBaseUnits?: string;
   signature: string | null;
   sentAt: string;
   snapshotId: string;
