@@ -34,13 +34,14 @@ function latestAirdropForWallet(state: WorkerState, wallet: string): {
     .filter(([key, record]) => record.wallet === wallet || key === wallet || key.endsWith(`:${wallet}`))
     .map(([, record]) => record)
     .sort((a, b) => b.sentAt.localeCompare(a.sentAt));
+  const latest = records[0];
 
-  return records[0]
-    ? {
-        signature: records[0].signature,
-        sentAt: records[0].sentAt
-      }
-    : null;
+  if (!latest) return null;
+
+  return {
+    signature: latest.signature,
+    sentAt: latest.sentAt
+  };
 }
 
 function toPublicState(config: AppConfig, state: WorkerState): Record<string, unknown> {
