@@ -3,7 +3,7 @@ import { airdropToEligibleWallets } from "./airdrop.js";
 import { swapSolToPump } from "./jupiter.js";
 import { log } from "./logger.js";
 import { startApiServer } from "./server.js";
-import { claimRentIfNeeded, createConnection, getSolBalance, loadKeypair } from "./solana.js";
+import { createConnection, getSolBalance, loadKeypair } from "./solana.js";
 import { snapshotHolders } from "./snapshot.js";
 import { loadState, saveState } from "./state.js";
 
@@ -34,7 +34,6 @@ export async function runOnce(config: AppConfig): Promise<void> {
 
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const actions = {
-    claimAttempted: false,
     swapAttempted: false,
     snapshotAttempted: false,
     airdropAttempted: false
@@ -50,17 +49,11 @@ export async function runOnce(config: AppConfig): Promise<void> {
       dryRun: config.dryRun,
       wallet: wallet.publicKey.toBase58(),
       pumpTokenMint: config.pumpTokenMint.toBase58(),
+      snapshotTokenMint: config.snapshotTokenMint.toBase58(),
+      airdropTokenMint: config.airdropTokenMint.toBase58(),
       solReserve: config.solReserve,
       minSwapSol: config.minSwapSol,
       intervalMinutes: config.intervalMinutes
-    });
-
-    actions.claimAttempted = true;
-    const claimSignature = await claimRentIfNeeded();
-    log("info", "rent claim step completed", {
-      runId,
-      claimed: Boolean(claimSignature),
-      claimSignature
     });
 
     const balanceSol = await getSolBalance(connection, wallet.publicKey);
@@ -80,6 +73,7 @@ export async function runOnce(config: AppConfig): Promise<void> {
       actions.swapAttempted = true;
       const swapSignature = await swapSolToPump({
         config,
+        connection,
         wallet,
         amountSol: amountSolToSwap
       });
@@ -139,6 +133,8 @@ export function mainLoop(config = loadConfig()): NodeJS.Timeout {
     solReserve: config.solReserve,
     minSwapSol: config.minSwapSol,
     maxSwapSolPerRun: config.maxSwapSolPerRun,
+    minHolderTokenUi: config.minHolderTokenUi,
+    maxHolderPercent: config.maxHolderPercent,
     airdropEnabled: config.airdropEnabled,
     publicApiEnabled: config.publicApiEnabled,
     port: config.publicApiEnabled ? config.port : null
