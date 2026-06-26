@@ -1,31 +1,30 @@
 # Pump Fun Airdrop Worker
 
-Railway worker for a SOL rent-claim / PUMP buy / holder snapshot / airdrop loop.
+Railway worker for a SOL-to-PUMP buy / holder snapshot / PUMP airdrop loop.
 
 Every `INTERVAL_MINUTES`:
 
-1. Calls `claimRentIfNeeded()`.
-2. Checks the worker wallet SOL balance.
-3. Leaves `SOL_RESERVE` in the wallet. Default: `0.2 SOL`.
-4. Swaps only the excess SOL into `PUMP_TOKEN_MINT` through Jupiter.
-5. Snapshots current holders of `SNAPSHOT_TOKEN_MINT`.
-6. Marks wallets ineligible if their snapshot balance decreases.
-7. Optionally airdrops `AIRDROP_TOKEN_MINT` to eligible wallets.
+1. Checks the worker wallet SOL balance.
+2. Leaves `SOL_RESERVE` in the wallet. Default: `0.2 SOL`.
+3. Swaps only the excess SOL into `PUMP_TOKEN_MINT` through Jupiter Lite.
+4. Snapshots current holders of `SNAPSHOT_TOKEN_MINT`.
+5. Requires holders to meet `MIN_HOLDER_TOKEN_UI`.
+6. Excludes holders at or above `MAX_HOLDER_PERCENT` of supply.
+7. Marks wallets ineligible if their snapshot balance decreases.
+8. Optionally airdrops `AIRDROP_TOKEN_MINT` to eligible wallets.
 
 It defaults to `DRY_RUN=true` and logs planned actions without signing/sending.
 
-## Important Limitations
+## Current Behavior
 
-`claimRentIfNeeded()` is a placeholder until the exact rent-claim instruction/API is provided:
+- No rent-claim logic is included.
+- `PUMP_TOKEN_MINT` is the token bought with SOL.
+- `SNAPSHOT_TOKEN_MINT` is the token holders must hold to qualify.
+- `AIRDROP_TOKEN_MINT` is the token sent to holders.
+- `AIRDROP_AMOUNT_UI=0` means proportional mode: distribute the worker wallet's full available `AIRDROP_TOKEN_MINT` balance across eligible holders each snapshot.
+- `AIRDROP_AMOUNT_UI>0` means fixed mode: send that fixed amount to each eligible holder, capped by `MAX_AIRDROPS_PER_RUN`.
 
-```ts
-async function claimRentIfNeeded(): Promise<string | null> {
-  // TODO: plug in the actual rent-claim instruction/API here.
-  return null;
-}
-```
-
-The "sold = ineligible" rule is implemented conservatively by comparing snapshots. If a wallet's token balance decreases, it is marked ineligible. That catches sells, but it also treats transfers out as ineligible. For perfect sell detection, plug in an indexer such as Helius/Birdeye/Bitquery with swap-level classification.
+The "sold = ineligible" rule is implemented by comparing snapshots. If a wallet's token balance decreases, it is marked ineligible. That catches sells, but it also treats transfers out as ineligible. Put known seller wallets or team wallets in `EXCLUDED_WALLETS` before launch.
 
 ## Env Vars
 
@@ -33,9 +32,8 @@ The "sold = ineligible" rule is implemented conservatively by comparing snapshot
 RPC_URL=
 WORKER_PRIVATE_KEY_BASE58=
 PUMP_TOKEN_MINT=
-JUPITER_API_KEY=
 
-JUPITER_API_URL=https://api.jup.ag/swap/v2
+JUPITER_API_URL=https://lite-api.jup.ag/swap/v1
 SOL_RESERVE=0.2
 MIN_SWAP_SOL=0.01
 MAX_SWAP_SOL_PER_RUN=10
@@ -45,7 +43,8 @@ DRY_RUN=true
 
 STATE_FILE_PATH=./data/state.json
 SNAPSHOT_TOKEN_MINT=
-MIN_HOLDER_TOKEN_UI=0
+MIN_HOLDER_TOKEN_UI=500000
+MAX_HOLDER_PERCENT=4
 EXCLUDED_WALLETS=
 
 AIRDROP_ENABLED=false
@@ -58,13 +57,19 @@ PORT=3000
 CORS_ORIGIN=*
 ```
 
-Notes:
+Launch notes:
 
-- `SNAPSHOT_TOKEN_MINT` defaults to `PUMP_TOKEN_MINT`.
-- `AIRDROP_TOKEN_MINT` defaults to `PUMP_TOKEN_MINT`.
+- `PUMP_TOKEN_MINT`: PUMP CA.
+- `AIRDROP_TOKEN_MINT`: PUMP CA if holders receive PUMP.
+- `SNAPSHOT_TOKEN_MINT`: your `$AIRDROP` token CA.
+- `MIN_HOLDER_TOKEN_UI=500000` means holders need at least 500K `$AIRDROP`.
+- `MAX_HOLDER_PERCENT=4` excludes wallets holding 4% or more of supply.
+- `EXCLUDED_WALLETS` is comma-separated: `wallet1,wallet2,wallet3`.
 - `WORKER_PRIVATE_KEY_BASE58` signs swaps and airdrops. Keep it only in Railway env vars.
+- `JUPITER_API_URL` uses Jupiter's no-key Lite endpoint by default. No Jupiter API key is required.
 - Use a Railway volume and set `STATE_FILE_PATH=/data/state.json` if you want state to survive redeploys.
-- If this serves a Vercel frontend, set `CORS_ORIGIN=https://your-site.vercel.app` after testing.
+- Keep `DRY_RUN=true` first. Switch to `DRY_RUN=false` only after logs look correct.
+- Set `AIRDROP_ENABLED=true` only when you want airdrops to actually run. With `DRY_RUN=true`, it only logs previews.
 
 ## Vercel Data Hookup
 
@@ -108,17 +113,24 @@ pnpm start
 ```
 
 5. Watch logs for:
-   - rent claim placeholder
    - SOL balance and reserve
    - planned Jupiter swap
    - holder snapshot count
+   - large-holder exclusions
    - ineligible wallets
-   - airdrop dry-run previews
+   - airdrop dry-run previews or skipped reason
 
 6. Once logs look right, set:
 
 ```env
 DRY_RUN=false
+```
+
+For live proportional PUMP airdrops, use:
+
+```env
+AIRDROP_ENABLED=true
+AIRDROP_AMOUNT_UI=0
 ```
 
 ## Local Development
