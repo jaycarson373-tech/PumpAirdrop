@@ -26,14 +26,34 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
+function latestAirdropForWallet(state: WorkerState, wallet: string): {
+  signature: string | null;
+  sentAt: string;
+} | null {
+  const records = Object.entries(state.airdrops)
+    .filter(([key, record]) => record.wallet === wallet || key === wallet || key.endsWith(`:${wallet}`))
+    .map(([, record]) => record)
+    .sort((a, b) => b.sentAt.localeCompare(a.sentAt));
+
+  return records[0]
+    ? {
+        signature: records[0].signature,
+        sentAt: records[0].sentAt
+      }
+    : null;
+}
+
 function toPublicState(config: AppConfig, state: WorkerState): Record<string, unknown> {
   const holders: PublicHolder[] = Object.entries(state.holderBalancesUi)
     .map(([wallet, balanceUi]) => {
-      const airdrop = state.airdrops[wallet];
+      const airdrop = latestAirdropForWallet(state, wallet);
       return {
         wallet,
         balanceUi,
-        eligible: !state.ineligibleWallets[wallet] && !config.excludedWallets.has(wallet),
+        eligible:
+          !state.ineligibleWallets[wallet] &&
+          !config.excludedWallets.has(wallet) &&
+          !state.largeHolderBalancesUi[wallet],
         airdropped: Boolean(airdrop),
         airdropSignature: airdrop?.signature ?? null
       };
@@ -45,8 +65,13 @@ function toPublicState(config: AppConfig, state: WorkerState): Record<string, un
     ...details
   }));
 
-  const airdrops = Object.entries(state.airdrops).map(([wallet, details]) => ({
+  const largeHolders = Object.entries(state.largeHolderBalancesUi).map(([wallet, balanceUi]) => ({
     wallet,
+    balanceUi
+  }));
+
+  const airdrops = Object.entries(state.airdrops).map(([id, details]) => ({
+    id,
     ...details
   }));
 
@@ -61,14 +86,21 @@ function toPublicState(config: AppConfig, state: WorkerState): Record<string, un
       snapshot: config.snapshotTokenMint.toBase58(),
       airdrop: config.airdropTokenMint.toBase58()
     },
+    rules: {
+      minHolderTokenUi: config.minHolderTokenUi,
+      maxHolderPercent: config.maxHolderPercent,
+      excludedWallets: config.excludedWallets.size
+    },
     counts: {
       holders: holders.length,
       eligible: holders.filter((holder) => holder.eligible).length,
       ineligible: ineligible.length,
-      airdropped: airdrops.length
+      largeHolders: largeHolders.length,
+      airdrops: airdrops.length
     },
     holders,
     ineligible,
+    largeHolders,
     airdrops
   };
 }
