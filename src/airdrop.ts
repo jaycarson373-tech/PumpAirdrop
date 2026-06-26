@@ -25,6 +25,73 @@ function amountToBaseUnits(amountUi: number, decimals: number): bigint {
   return whole + fraction;
 }
 
+function baseUnitsToUiString(amount: bigint, decimals: number): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = amount / scale;
+  const fraction = amount % scale;
+
+  if (fraction === 0n) return whole.toString();
+
+  return `${whole}.${fraction.toString().padStart(decimals, "0").replace(/0+$/, "")}`;
+}
+
+function airdropRecordKey(snapshotId: string, wallet: string): string {
+  return `${snapshotId}:${wallet}`;
+}
+
+async function getSourceTokenBalanceBaseUnits(
+  connection: Connection,
+  sourceAta: PublicKey
+): Promise<bigint> {
+  try {
+    const balance = await withRetry("get airdrop source token balance", () =>
+      connection.getTokenAccountBalance(sourceAta, "confirmed")
+    );
+    return BigInt(balance.value.amount);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("warn", "airdrop source token balance unavailable", {
+      sourceAta: sourceAta.toBase58(),
+      error: message
+    });
+    return 0n;
+  }
+}
+
+function buildProportionalAirdrops(params: {
+  snapshot: HolderSnapshot;
+  recipients: string[];
+  totalAmountBaseUnits: bigint;
+  decimals: number;
+}): Array<{ recipient: string; amountBaseUnits: bigint; amountUi: string }> {
+  const { snapshot, recipients, totalAmountBaseUnits, decimals } = params;
+  const weights = recipients.map((recipient) => ({
+    recipient,
+    weight: amountToBaseUnits(Number(snapshot.holders[recipient] ?? "0"), 9)
+  }));
+  const totalWeight = weights.reduce((sum, item) => sum + item.weight, 0n);
+
+  if (totalWeight <= 0n || totalAmountBaseUnits <= 0n) return [];
+
+  let allocated = 0n;
+
+  return weights
+    .map((item, index) => {
+      const isLast = index === weights.length - 1;
+      const amountBaseUnits = isLast
+        ? totalAmountBaseUnits - allocated
+        : (totalAmountBaseUnits * item.weight) / totalWeight;
+      allocated += amountBaseUnits;
+
+      return {
+        recipient: item.recipient,
+        amountBaseUnits,
+        amountUi: baseUnitsToUiString(amountBaseUnits, decimals)
+      };
+    })
+    .filter((item) => item.amountBaseUnits > 0n);
+}
+
 export async function airdropToEligibleWallets(params: {
   connection: Connection;
   config: AppConfig;
@@ -39,47 +106,78 @@ export async function airdropToEligibleWallets(params: {
     return;
   }
 
-  if (config.airdropAmountUi <= 0) {
-    log("info", "airdrop skipped because AIRDROP_AMOUNT_UI is zero");
-    return;
-  }
-
   const mint = config.airdropTokenMint;
   const mintInfo = await withRetry("get airdrop mint info", () => getMint(connection, mint));
-  const amount = amountToBaseUnits(config.airdropAmountUi, mintInfo.decimals);
+  const sourceAta = getAssociatedTokenAddressSync(mint, authority.publicKey);
+  const pendingRecipients = snapshot.eligibleWallets
+    .filter((wallet) => !state.airdrops[airdropRecordKey(snapshot.snapshotId, wallet)])
+    .slice(0, config.maxAirdropsPerRun);
 
-  if (amount <= 0n) {
-    log("info", "airdrop skipped because computed base-unit amount is zero", {
-      airdropAmountUi: config.airdropAmountUi,
-      decimals: mintInfo.decimals
+  if (pendingRecipients.length === 0) {
+    log("info", "airdrop skipped because no eligible recipients are pending for this snapshot", {
+      snapshotId: snapshot.snapshotId
     });
     return;
   }
 
-  const sourceAta = getAssociatedTokenAddressSync(mint, authority.publicKey);
-  const pendingRecipients = snapshot.eligibleWallets
-    .filter((wallet) => !state.airdrops[wallet])
-    .slice(0, config.maxAirdropsPerRun);
+  const sourceBalanceBaseUnits = await getSourceTokenBalanceBaseUnits(connection, sourceAta);
+  const fixedAmountBaseUnits =
+    config.airdropAmountUi > 0 ? amountToBaseUnits(config.airdropAmountUi, mintInfo.decimals) : 0n;
+
+  const plannedAirdrops =
+    fixedAmountBaseUnits > 0n
+      ? pendingRecipients.map((recipient) => ({
+          recipient,
+          amountBaseUnits: fixedAmountBaseUnits,
+          amountUi: baseUnitsToUiString(fixedAmountBaseUnits, mintInfo.decimals)
+        }))
+      : buildProportionalAirdrops({
+          snapshot,
+          recipients: pendingRecipients,
+          totalAmountBaseUnits: sourceBalanceBaseUnits,
+          decimals: mintInfo.decimals
+        });
+
+  if (plannedAirdrops.length === 0) {
+    log("info", "airdrop skipped because no transferable token amount is available", {
+      sourceAta: sourceAta.toBase58(),
+      sourceBalanceBaseUnits: sourceBalanceBaseUnits.toString(),
+      airdropAmountUi: config.airdropAmountUi
+    });
+    return;
+  }
+
+  const totalPlannedBaseUnits = plannedAirdrops.reduce((sum, item) => sum + item.amountBaseUnits, 0n);
+
+  if (sourceBalanceBaseUnits < totalPlannedBaseUnits && !config.dryRun) {
+    throw new Error(
+      `Airdrop source balance ${sourceBalanceBaseUnits} is below planned amount ${totalPlannedBaseUnits}`
+    );
+  }
 
   log("info", "airdrop batch planned", {
     mint: mint.toBase58(),
     sourceAta: sourceAta.toBase58(),
-    amountUi: config.airdropAmountUi,
-    amountBaseUnits: amount.toString(),
-    pendingRecipients: pendingRecipients.length,
+    mode: fixedAmountBaseUnits > 0n ? "fixed" : "proportional",
+    sourceBalanceBaseUnits: sourceBalanceBaseUnits.toString(),
+    totalPlannedBaseUnits: totalPlannedBaseUnits.toString(),
+    pendingRecipients: plannedAirdrops.length,
+    eligibleWallets: snapshot.eligibleWallets.length,
     maxAirdropsPerRun: config.maxAirdropsPerRun,
     dryRun: config.dryRun
   });
 
-  for (const recipient of pendingRecipients) {
-    const recipientOwner = new PublicKey(recipient);
+  for (const planned of plannedAirdrops) {
+    const recipientOwner = new PublicKey(planned.recipient);
     const destinationAta = getAssociatedTokenAddressSync(mint, recipientOwner);
+    const recordKey = airdropRecordKey(snapshot.snapshotId, planned.recipient);
 
     if (config.dryRun) {
       log("info", "dry run: would airdrop tokens", {
-        recipient,
+        recipient: planned.recipient,
         destinationAta: destinationAta.toBase58(),
-        amountUi: config.airdropAmountUi,
+        amountUi: planned.amountUi,
+        amountBaseUnits: planned.amountBaseUnits.toString(),
         snapshotId: snapshot.snapshotId
       });
       continue;
@@ -97,7 +195,7 @@ export async function airdropToEligibleWallets(params: {
         mint,
         destinationAta,
         authority.publicKey,
-        amount,
+        planned.amountBaseUnits,
         mintInfo.decimals
       )
     );
@@ -108,16 +206,19 @@ export async function airdropToEligibleWallets(params: {
       })
     );
 
-    state.airdrops[recipient] = {
-      amountUi: String(config.airdropAmountUi),
+    state.airdrops[recordKey] = {
+      wallet: planned.recipient,
+      amountUi: planned.amountUi,
+      amountBaseUnits: planned.amountBaseUnits.toString(),
       signature,
       sentAt: new Date().toISOString(),
       snapshotId: snapshot.snapshotId
     };
 
     log("info", "airdrop sent", {
-      recipient,
-      amountUi: config.airdropAmountUi,
+      recipient: planned.recipient,
+      amountUi: planned.amountUi,
+      amountBaseUnits: planned.amountBaseUnits.toString(),
       signature,
       snapshotId: snapshot.snapshotId
     });
