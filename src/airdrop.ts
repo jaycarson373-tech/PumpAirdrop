@@ -109,9 +109,15 @@ export async function airdropToEligibleWallets(params: {
   const mint = config.airdropTokenMint;
   const mintInfo = await withRetry("get airdrop mint info", () => getMint(connection, mint));
   const sourceAta = getAssociatedTokenAddressSync(mint, authority.publicKey);
-  const pendingRecipients = snapshot.eligibleWallets
-    .filter((wallet) => !state.airdrops[airdropRecordKey(snapshot.snapshotId, wallet)])
-    .slice(0, config.maxAirdropsPerRun);
+  const allPendingRecipients = snapshot.eligibleWallets.filter(
+    (wallet) => !state.airdrops[airdropRecordKey(snapshot.snapshotId, wallet)]
+  );
+  const fixedAmountBaseUnits =
+    config.airdropAmountUi > 0 ? amountToBaseUnits(config.airdropAmountUi, mintInfo.decimals) : 0n;
+  const pendingRecipients =
+    fixedAmountBaseUnits > 0n
+      ? allPendingRecipients.slice(0, config.maxAirdropsPerRun)
+      : allPendingRecipients;
 
   if (pendingRecipients.length === 0) {
     log("info", "airdrop skipped because no eligible recipients are pending for this snapshot", {
@@ -121,8 +127,6 @@ export async function airdropToEligibleWallets(params: {
   }
 
   const sourceBalanceBaseUnits = await getSourceTokenBalanceBaseUnits(connection, sourceAta);
-  const fixedAmountBaseUnits =
-    config.airdropAmountUi > 0 ? amountToBaseUnits(config.airdropAmountUi, mintInfo.decimals) : 0n;
 
   const plannedAirdrops =
     fixedAmountBaseUnits > 0n
@@ -142,7 +146,8 @@ export async function airdropToEligibleWallets(params: {
     log("info", "airdrop skipped because no transferable token amount is available", {
       sourceAta: sourceAta.toBase58(),
       sourceBalanceBaseUnits: sourceBalanceBaseUnits.toString(),
-      airdropAmountUi: config.airdropAmountUi
+      airdropAmountUi: config.airdropAmountUi,
+      mode: fixedAmountBaseUnits > 0n ? "fixed" : "proportional"
     });
     return;
   }
@@ -163,7 +168,7 @@ export async function airdropToEligibleWallets(params: {
     totalPlannedBaseUnits: totalPlannedBaseUnits.toString(),
     pendingRecipients: plannedAirdrops.length,
     eligibleWallets: snapshot.eligibleWallets.length,
-    maxAirdropsPerRun: config.maxAirdropsPerRun,
+    maxAirdropsPerRun: fixedAmountBaseUnits > 0n ? config.maxAirdropsPerRun : null,
     dryRun: config.dryRun
   });
 
