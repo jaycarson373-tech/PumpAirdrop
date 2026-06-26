@@ -5,7 +5,6 @@ import {
   PublicKey
 } from "@solana/web3.js";
 import bs58 from "bs58";
-import { log } from "./logger.js";
 import { withRetry } from "./retry.js";
 
 export const NATIVE_SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
@@ -38,11 +37,4 @@ export async function getSolBalance(connection: Connection, wallet: PublicKey): 
     connection.getBalance(wallet, "confirmed")
   );
   return lamports / LAMPORTS_PER_SOL;
-}
-
-export async function claimRentIfNeeded(): Promise<string | null> {
-  // TODO: plug in the actual rent-claim instruction/API here.
-  // Return tx signature if a claim happened, otherwise null.
-  log("info", "rent claim placeholder skipped");
-  return null;
 }
